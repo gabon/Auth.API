@@ -1,0 +1,144 @@
+# Build PR
+# Version 1.0.0
+
+trigger: none
+
+stages:
+- stage: Build
+  jobs: 
+  - job: Build 
+    pool: 'Default'
+    workspace:
+       clean: all
+       
+    strategy:
+      maxParallel: 2
+      matrix: 
+        debug:
+          buildConfiguration: debug
+        release:
+          buildConfiguration: release
+          
+    variables:
+      solution: '**/*.sln'
+      buildPlatform: 'Any CPU'
+      NugetProject: '**/Authorize.Application.csproj'
+       
+    steps:
+     # Nuget Installer
+    - task: NuGetToolInstaller@1
+      displayName: 'Nuget Installer'
+      inputs:
+        versionSpec: 5.x
+  
+    # Nuget Restore
+    - task: NuGetCommand@2
+      displayName: 'Nuget Restore'
+      inputs:
+        restoreSolution: '$(solution)'
+        feedsToUse: config
+        nugetConfigPath: nuget.config
+  
+    # Build solution
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet build'  
+      inputs:
+        command: build
+        projects: '**\*.csproj'   
+        arguments: -c $(BuildConfiguration)
+
+    # Nuget pack prerelease
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet pack prerelease'
+      condition: and(succeeded(), eq(variables['BuildConfiguration'], 'debug'))
+      inputs:
+        command: 'pack'
+        arguments: -c $(BuildConfiguration)
+        packagesToPack: '$(NugetProject)'
+        packDirectory: '$(System.DefaultWorkingDirectory)/Nuget/$(BuildConfiguration)'        
+        includesymbols: true
+        includesource: true
+        versioningScheme: 'off'
+        buildProperties: 'VersionSuffix=rc$(Build.BuildId)'
+
+    - publish: '$(System.DefaultWorkingDirectory)/Nuget/$(BuildConfiguration)'
+      condition: and(succeeded(), eq(variables['BuildConfiguration'], 'debug'))
+      artifact: nugets-$(BuildConfiguration)
+
+
+  - job: 'Test_codeCoverage'
+    pool: 'Default'
+    workspace:
+       clean: all          
+    strategy:
+      maxParallel: 2
+      matrix: 
+        debug:
+          buildConfiguration: debug
+        release:
+          buildConfiguration: release
+    steps:      
+    - task: DotNetCoreCLI@2
+      displayName: 'Testing + Generate code coverage'
+      inputs:
+        command: test    
+        projects: |
+         **\*UnitTest*.csproj
+         **\*.UT.csproj
+         **\*.IT.csproj
+        arguments: '-c $(BuildConfiguration) /p:CollectCoverage=True --collect:"XPlat Code Coverage" /p:CoverletOutput=$(Build.SourcesDirectory)\reports\coverlet'
+        nobuild: true
+        publishTestResults: --logger trx --results-directory $(Build.SourcesDirectory)\reports
+    
+    
+    - task: DotNetCoreCLI@2
+      inputs:
+        command: custom
+        custom: tool
+        arguments: install dotnet-reportgenerator-globaltool --tool-path . --ignore-failed-sources
+      displayName: Install ReportGenerator tool
+      
+    - script: 'reportgenerator -reports:$(Build.SourcesDirectory)\**\coverage.cobertura.xml -targetdir:$(Build.SourcesDirectory)\reports\coverlet -reporttypes:Cobertura;Badges'
+      displayName: Create reports
+    
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish code coverage'
+      inputs:
+        codeCoverageTool: Cobertura
+        summaryFileLocation: $(Build.SourcesDirectory)\reports\coverlet\cobertura.xml
+        reportDirectory: $(Build.SourcesDirectory)\reports\coverlet
+
+
+
+    
+- stage: Nuget_Prerelease
+  variables:            
+    NugetProject: '**/Authorize.Application.csproj'
+  jobs:
+  - deployment: Prerelease
+    pool: 'Default'
+    workspace:
+      clean: all
+    environment: 'Prerelease'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          # Nuget push prerelease
+          - task: NuGetCommand@2
+            displayName: 'NuGet push'
+            inputs:
+              command: 'push'
+              projects:
+              packagesToPush: '$(Pipeline.Workspace)/nugets-debug/*symbols.nupkg'
+              nuGetFeedType: 'internal'
+              publishVstsFeed: 'Authorization.API/marcoslg-nugets'
+              allowPackageConflicts: true
+              
+
+#- task: PublishCodeCoverageResults@1
+#  displayName: 'Publish code coverage'
+#  inputs:
+#    codeCoverageTool: Cobertura
+#    summaryFileLocation: $(Build.SourcesDirectory)/coverlet/reports/Cobertura.xml
+#    additionalCodeCoverageFiles: $(Build.SourcesDirectory)/**/TestResults/**/*.coverage
