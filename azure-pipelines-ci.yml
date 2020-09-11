@@ -1,0 +1,88 @@
+# Build CI 
+# Version 1.0.0
+
+trigger:
+  batch: true
+  branches:
+    include:
+    - master
+
+stages:
+- stage: Build
+  jobs:
+  - job: Build
+    pool: 'Default'
+    workspace:
+      clean: all
+
+    strategy:
+      maxParallel: 2
+      matrix: 
+        debug:
+          buildConfiguration: debug
+        release:
+          buildConfiguration: release
+
+    variables:
+      solution: '**/*.sln'
+      buildPlatform: 'Any CPU'
+
+    # Nuget Installer
+    steps:
+    - task: NuGetToolInstaller@1
+      displayName: 'Nuget Installer'
+      inputs:
+        versionSpec: 5.x
+
+    # Nuget Restore
+    - task: NuGetCommand@2
+      displayName: 'Nuget Restore'
+      inputs:
+        restoreSolution: '$(solution)'
+        feedsToUse: config
+        nugetConfigPath: nuget.config
+
+    # Build solution
+    - task: VSBuild@1
+      displayName: 'MSBuild'
+      inputs:
+        solution: '$(solution)'
+        platform: '$(buildPlatform)'
+        configuration: '$(buildConfiguration)'
+        clean: true
+        maximumCpuCount: true
+
+    # Unit tests
+    - task: VSTest@2
+      displayName: 'Unit Tests'
+      inputs:
+        testAssemblyVer2: |
+         **\*UnitTest*.dll
+         !**\*TestAdapter.dll
+         !**\obj\**
+
+    # Nuget pack release
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet pack release'
+      condition: and(succeeded(), eq(variables['BuildConfiguration'], 'release'), ne(variables['NugetProject'], ''))
+      inputs:
+        command: pack
+        packagesToPack: '$(NugetProject)'
+        packDirectory: '$(System.DefaultWorkingDirectory)/Nuget/$(BuildConfiguration)'
+        
+
+    # Nuget pack prerelease
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet pack prerelease'
+      condition: and(succeeded(), eq(variables['BuildConfiguration'], 'debug'), ne(variables['NugetProject'], ''))
+      inputs:
+        command: 'pack'
+        packagesToPack: '$(NugetProject)'
+        packDirectory: '$(System.DefaultWorkingDirectory)/Nuget/$(BuildConfiguration)'        
+        includesymbols: true
+        includesource: true
+        versioningScheme: 'off'
+        buildProperties: 'VersionSuffix=rc$(RCNumber)'
+
+    - publish: '$(System.DefaultWorkingDirectory)/Nuget/$(BuildConfiguration)'
+      artifact: nugets-$(BuildConfiguration)
